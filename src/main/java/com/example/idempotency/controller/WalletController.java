@@ -8,6 +8,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Mono;
 
+import java.util.Random;
+
 @RestController
 @RequestMapping("/api/wallet")
 public class WalletController {
@@ -22,6 +24,12 @@ public class WalletController {
     @PostMapping("/topUp")
     public Mono<ResponseEntity<TopUpResponse>> topUpWallet(@RequestHeader("Idempotency-Key") String idempotencyKey,
                                                            @RequestBody TopUpRequest request) {
+        // simulate a random failure (50% chance)
+        Random random = new Random();
+        if(!idempotencyStore.contains(idempotencyKey) && !random.nextBoolean()) {
+            return Mono.error(new RuntimeException("Simulated transient failure"));
+        }
+
         if(idempotencyStore.contains(idempotencyKey)) {
             TopUpResponse existing = idempotencyStore.getTopUpResponse(idempotencyKey);
             return Mono.just(ResponseEntity.ok(new TopUpResponse("Duplicate request. Returning previous result.", existing.getNewBalance(), true)));
