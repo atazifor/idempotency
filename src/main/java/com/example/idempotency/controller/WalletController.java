@@ -1,5 +1,6 @@
 package com.example.idempotency.controller;
 
+import com.example.idempotency.model.TopUpAuditEntry;
 import com.example.idempotency.model.TopUpRequest;
 import com.example.idempotency.model.TopUpResponse;
 import com.example.idempotency.service.WalletService;
@@ -13,14 +14,17 @@ import reactor.core.publisher.Mono;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Map;
-import java.util.Random;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/wallet")
 public class WalletController {
     Logger logger = LoggerFactory.getLogger(WalletController.class);
+
+    //in-memory audit trail store
+    private final List<TopUpAuditEntry> auditLog = Collections.synchronizedList(new ArrayList<>());
 
     //holds user-id and timestamp of last request for rate limiting
     private final Map<String, Instant> lastRequestMap = new ConcurrentHashMap<>();
@@ -34,7 +38,7 @@ public class WalletController {
         this.idempotencyStore = idempotencyStore;
     }
 
-    @PostMapping("/topUp")
+    @PostMapping("/topup")
     public Mono<ResponseEntity<TopUpResponse>> topUpWallet(@RequestHeader("Idempotency-Key") String idempotencyKey,
                                                            @RequestBody TopUpRequest request) {
         //apply rate limiting
@@ -42,6 +46,8 @@ public class WalletController {
         Instant now = Instant.now();
         if(lastRequest != null && Duration.between(lastRequest, now).compareTo(rateLimitWindow) < 0) {
             logger.warn("[RATE LIMIT] userId={}, blocked", request.getUserId());
+            //add to audit trail
+            auditLog.add(new TopUpAuditEntry(request.getUserId(), idempotencyKey, request.getAmount(), "RATE_LIMITED"));
             return Mono.just(ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
                     .body(new TopUpResponse("Rate limit exceeded. Try again later.", 0, false)));
         }
@@ -60,6 +66,8 @@ public class WalletController {
         if(foundInKeystore) {
             TopUpResponse existing = idempotencyStore.getTopUpResponse(idempotencyKey);
             logger.info("[DUPLICATE] userId={}, key={}, returning previous result", request.getUserId(), idempotencyKey);
+            //add to audit trail
+            auditLog.add(new TopUpAuditEntry(request.getUserId(), idempotencyKey, request.getAmount(), "DUPLICATE"));
             return Mono.just(ResponseEntity.ok(new TopUpResponse("Duplicate request. Returning previous result.", existing.getNewBalance(), true)));
         }
 
@@ -69,6 +77,16 @@ public class WalletController {
         double newBalance = walletService.topUp(request.getUserId(), request.getAmount());
         TopUpResponse response = new TopUpResponse("Top-up successful", newBalance, false);
         idempotencyStore.store(idempotencyKey, response);
+        //add to audit trail
+        auditLog.add(new TopUpAuditEntry(request.getUserId(), idempotencyKey, request.getAmount(), "NEW"));
         return Mono.just(ResponseEntity.ok(response));
+    }
+
+    @GetMapping("/topup/log/{userId}")
+    public Mono<ResponseEntity<List<TopUpAuditEntry>>> getAuditLog(@PathVariable String userId) {
+        return Mono.just(ResponseEntity.ok(auditLog
+                .stream()
+                .filter(entry -> entry.getUserId().equals(userId))
+                .collect(Collectors.toList())));
     }
 }
