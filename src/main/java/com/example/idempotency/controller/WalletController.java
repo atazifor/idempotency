@@ -6,16 +6,25 @@ import com.example.idempotency.service.WalletService;
 import com.example.idempotency.store.IdempotencyStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.ConcurrentHashMap;
 
 @RestController
 @RequestMapping("/api/wallet")
 public class WalletController {
     Logger logger = LoggerFactory.getLogger(WalletController.class);
+
+    //holds user-id and timestamp of last request for rate limiting
+    private final Map<String, Instant> lastRequestMap = new ConcurrentHashMap<>();
+    private final Duration rateLimitWindow = Duration.ofSeconds(3);
 
     private final WalletService walletService;
     private final IdempotencyStore idempotencyStore;
@@ -28,11 +37,23 @@ public class WalletController {
     @PostMapping("/topUp")
     public Mono<ResponseEntity<TopUpResponse>> topUpWallet(@RequestHeader("Idempotency-Key") String idempotencyKey,
                                                            @RequestBody TopUpRequest request) {
+        //apply rate limiting
+        Instant lastRequest = lastRequestMap.get(request.getUserId());
+        Instant now = Instant.now();
+        if(lastRequest != null && Duration.between(lastRequest, now).compareTo(rateLimitWindow) < 0) {
+            logger.warn("[RATE LIMIT] userId={}, blocked", request.getUserId());
+            return Mono.just(ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                    .body(new TopUpResponse("Rate limit exceeded. Try again later.", 0, false)));
+        }
+        lastRequestMap.put(request.getUserId(), now);
+
         // simulate a random failure (50% chance)
         Random random = new Random();
         boolean foundInKeystore = idempotencyStore.contains(idempotencyKey);
         if(!foundInKeystore && !random.nextBoolean()) {
-            return Mono.error(new RuntimeException("Simulated transient failure"));
+            String simulatedTransientFailure = new RuntimeException("Simulated transient failure").getLocalizedMessage();
+            logger.error("[ERROR] userId={}, key={}, message={}", request.getUserId(), idempotencyKey, simulatedTransientFailure);
+            return Mono.just(ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(new TopUpResponse(simulatedTransientFailure, 0, false)));
         }
 
 
