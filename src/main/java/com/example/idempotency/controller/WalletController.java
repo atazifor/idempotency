@@ -4,6 +4,7 @@ import com.example.idempotency.model.TopUpAuditEntry;
 import com.example.idempotency.model.TopUpRequest;
 import com.example.idempotency.model.TopUpResponse;
 import com.example.idempotency.service.WalletService;
+import org.apache.kafka.common.quota.ClientQuotaAlteration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
@@ -45,33 +46,26 @@ public class WalletController {
 
     @PostMapping("/topup")
     public Mono<ResponseEntity<TopUpResponse>> topUpWallet(@RequestBody TopUpRequest request) {
-        String rateKey = "rate:" + request.userId();
-        String idemKey = "idempotency:" + request.idempotencyKey();
-        return redisTemplate.opsForValue().increment(rateKey)
-                .flatMap(count -> {
-                    Mono<Boolean> maybeExpired = Mono.just(Boolean.TRUE);
-                    if (count == 1) {
-                        maybeExpired = redisTemplate.expire(rateKey, RATE_LIMIT_WINDOW);
-                    }
-                    if (count > RATE_LIMIT_COUNT) {
+        return rateLimitReached(request.userId())
+                .flatMap(reached -> {
+                    if (reached) {
                         logger.warn("[RATE LIMIT] userId={}, blocked", request.userId());
                         auditKafka(request, "RATE_LIMITED");
                         return Mono.just(ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
                                 .body(new TopUpResponse("Rate limit exceeded. Try again later.", 0, false)));
                     }
-                    return maybeExpired.then(
-                            redisTemplate.opsForValue().get(idemKey)
-                                    .map(existing -> {
-                                        logger.info("[DUPLICATE] userId={}, key={}, returning previous result", request.userId(), idemKey);
-                                        auditKafka(request, "DUPLICATE");
-                                        return ResponseEntity.ok(new TopUpResponse("Duplicate request. Returning previous result.", Double.parseDouble(existing), true));
-                                    }).switchIfEmpty(
-                                            simulateFailure(request)
-                                                    .switchIfEmpty(processTopUp(request))
-                                    )
-                    );
+                    return checkIdempotency(request.idempotencyKey())
+                            .flatMap(opt -> {
+                                if (opt.isPresent()) {
+                                    logger.info("[DUPLICATE] userId={}, key={}, returning previous result", request.userId(), request.idempotencyKey());
+                                    auditKafka(request, "DUPLICATE");
+                                    return Mono.just(ResponseEntity.ok(new TopUpResponse("Duplicate request. Returning previous result.", opt.get(), true)));
+                                }
+                                return
+                                        simulateFailure(request)
+                                                .switchIfEmpty(processTopUp(request));
+                            });
                 });
-
     }
 
     @GetMapping("/topup/log/{userId}")
@@ -80,6 +74,27 @@ public class WalletController {
                 .stream()
                 .filter(entry -> entry.getUserId().equals(userId))
                 .collect(Collectors.toList())));
+    }
+
+    public Mono<Boolean> rateLimitReached(String userId) {
+        String key = "rate:" + userId;
+        return redisTemplate.opsForValue().increment(key)
+                .flatMap(count -> {
+                    Mono<Boolean> maybeExpire = count == 1
+                            ? redisTemplate.expire(key, RATE_LIMIT_WINDOW)
+                            : Mono.just(Boolean.TRUE);
+
+                    return maybeExpire.thenReturn(count > RATE_LIMIT_COUNT);
+                });
+    }
+
+    public Mono<Optional<Double>> checkIdempotency(String idemKey) {
+        String idempotencyKey = "idempotency:" + idemKey;
+        return redisTemplate.opsForValue()
+                .get(idempotencyKey)
+                .map(Double::parseDouble)
+                .map(Optional::of)
+                .defaultIfEmpty(Optional.empty());
     }
 
     private Mono<ResponseEntity<TopUpResponse>> processTopUp(TopUpRequest request) {
