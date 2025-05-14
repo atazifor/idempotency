@@ -4,11 +4,12 @@ import com.example.idempotency.model.TopUpAuditEntry;
 import com.example.idempotency.model.TopUpRequest;
 import com.example.idempotency.model.TopUpResponse;
 import com.example.idempotency.service.WalletService;
-import com.example.idempotency.store.IdempotencyStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Mono;
 
@@ -28,58 +29,49 @@ public class WalletController {
 
     //holds user-id and timestamp of last request for rate limiting
     private final Map<String, Instant> lastRequestMap = new ConcurrentHashMap<>();
-    private final Duration rateLimitWindow = Duration.ofSeconds(3);
+    private static final Duration RATE_LIMIT_WINDOW = Duration.ofSeconds(15);
+    private static final Duration IDEMPOTENCY_KEY_TTL = Duration.ofSeconds(60);
+    private static final int RATE_LIMIT_COUNT = 5;
 
     private final WalletService walletService;
-    private final IdempotencyStore idempotencyStore;
+    private final ReactiveStringRedisTemplate   redisTemplate; //used for rate limiting, idempotency
+    private final KafkaTemplate<String, TopUpAuditEntry> kafkaTemplate;
 
-    public WalletController(WalletService walletService, IdempotencyStore idempotencyStore) {
+    public WalletController(WalletService walletService, ReactiveStringRedisTemplate   redisTemplate, KafkaTemplate<String, TopUpAuditEntry> kafkaTemplate) {
         this.walletService = walletService;
-        this.idempotencyStore = idempotencyStore;
+        this.redisTemplate = redisTemplate;
+        this.kafkaTemplate = kafkaTemplate;
     }
 
     @PostMapping("/topup")
-    public Mono<ResponseEntity<TopUpResponse>> topUpWallet(@RequestHeader("Idempotency-Key") String idempotencyKey,
-                                                           @RequestBody TopUpRequest request) {
-        //apply rate limiting
-        Instant lastRequest = lastRequestMap.get(request.getUserId());
-        Instant now = Instant.now();
-        if(lastRequest != null && Duration.between(lastRequest, now).compareTo(rateLimitWindow) < 0) {
-            logger.warn("[RATE LIMIT] userId={}, blocked", request.getUserId());
-            //add to audit trail
-            auditLog.add(new TopUpAuditEntry(request.getUserId(), idempotencyKey, request.getAmount(), "RATE_LIMITED"));
-            return Mono.just(ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
-                    .body(new TopUpResponse("Rate limit exceeded. Try again later.", 0, false)));
-        }
-        lastRequestMap.put(request.getUserId(), now);
+    public Mono<ResponseEntity<TopUpResponse>> topUpWallet(@RequestBody TopUpRequest request) {
+        String rateKey = "rate:" + request.userId();
+        String idemKey = "idempotency:" + request.idempotencyKey();
+        return redisTemplate.opsForValue().increment(rateKey)
+                .flatMap(count -> {
+                    Mono<Boolean> maybeExpired = Mono.just(Boolean.TRUE);
+                    if (count == 1) {
+                        maybeExpired = redisTemplate.expire(rateKey, RATE_LIMIT_WINDOW);
+                    }
+                    if (count > RATE_LIMIT_COUNT) {
+                        logger.warn("[RATE LIMIT] userId={}, blocked", request.userId());
+                        auditKafka(request, "RATE_LIMITED");
+                        return Mono.just(ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                                .body(new TopUpResponse("Rate limit exceeded. Try again later.", 0, false)));
+                    }
+                    return maybeExpired.then(
+                            redisTemplate.opsForValue().get(idemKey)
+                                    .map(existing -> {
+                                        logger.info("[DUPLICATE] userId={}, key={}, returning previous result", request.userId(), idemKey);
+                                        auditKafka(request, "DUPLICATE");
+                                        return ResponseEntity.ok(new TopUpResponse("Duplicate request. Returning previous result.", Double.parseDouble(existing), true));
+                                    }).switchIfEmpty(
+                                            simulateFailure(request)
+                                                    .switchIfEmpty(processTopUp(request))
+                                    )
+                    );
+                });
 
-        // simulate a random failure (50% chance)
-        Random random = new Random();
-        boolean foundInKeystore = idempotencyStore.contains(idempotencyKey);
-        if(!foundInKeystore && !random.nextBoolean()) {
-            String simulatedTransientFailure = new RuntimeException("Simulated transient failure").getLocalizedMessage();
-            logger.error("[ERROR] userId={}, key={}, message={}", request.getUserId(), idempotencyKey, simulatedTransientFailure);
-            return Mono.just(ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(new TopUpResponse(simulatedTransientFailure, 0, false)));
-        }
-
-
-        if(foundInKeystore) {
-            TopUpResponse existing = idempotencyStore.getTopUpResponse(idempotencyKey);
-            logger.info("[DUPLICATE] userId={}, key={}, returning previous result", request.getUserId(), idempotencyKey);
-            //add to audit trail
-            auditLog.add(new TopUpAuditEntry(request.getUserId(), idempotencyKey, request.getAmount(), "DUPLICATE"));
-            return Mono.just(ResponseEntity.ok(new TopUpResponse("Duplicate request. Returning previous result.", existing.getNewBalance(), true)));
-        }
-
-        logger.info("[NEW TOP-UP] userId={}, key={}, amount={}", request.getUserId(), idempotencyKey, request.getAmount());
-
-
-        double newBalance = walletService.topUp(request.getUserId(), request.getAmount());
-        TopUpResponse response = new TopUpResponse("Top-up successful", newBalance, false);
-        idempotencyStore.store(idempotencyKey, response);
-        //add to audit trail
-        auditLog.add(new TopUpAuditEntry(request.getUserId(), idempotencyKey, request.getAmount(), "NEW"));
-        return Mono.just(ResponseEntity.ok(response));
     }
 
     @GetMapping("/topup/log/{userId}")
@@ -88,5 +80,36 @@ public class WalletController {
                 .stream()
                 .filter(entry -> entry.getUserId().equals(userId))
                 .collect(Collectors.toList())));
+    }
+
+    private Mono<ResponseEntity<TopUpResponse>> processTopUp(TopUpRequest request) {
+        double newBalance = walletService.topUp(request.userId(), request.amount());
+        TopUpResponse response = new TopUpResponse("Top-up successful", newBalance, false);
+
+        //add idempotency key to redis with ttl
+        return redisTemplate.opsForValue()
+                .set("idempotency:" + request.idempotencyKey(), String.valueOf(response.getNewBalance()), IDEMPOTENCY_KEY_TTL)
+                        .then(Mono.fromRunnable(
+                                () -> auditKafka(request, "NEW")
+                        )).thenReturn(ResponseEntity.ok(response));
+        //add to audit trail
+
+    }
+
+    /*simulate a random failure (50% chance)*/
+    private Mono<ResponseEntity<TopUpResponse>> simulateFailure(TopUpRequest request) {
+        boolean shouldFail = new Random().nextBoolean();
+        if(shouldFail) {
+            String simulatedTransientFailure = new RuntimeException("Simulated transient failure").getLocalizedMessage();
+            logger.error("[ERROR] userId={}, key={}, message={}", request.userId(), request.idempotencyKey(), simulatedTransientFailure);
+            auditKafka(request, "TRANSIENT_ERROR");
+            return Mono.just(ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(new TopUpResponse(simulatedTransientFailure, 0, false)));
+        }
+        return Mono.empty();
+    }
+
+    private void auditKafka(TopUpRequest request, String eventType) {
+        TopUpAuditEntry entry = new TopUpAuditEntry(request.userId(), request.idempotencyKey(), request.amount(), eventType);
+        kafkaTemplate.send("topup-events", request.userId(), entry);
     }
 }

@@ -146,12 +146,49 @@ We use `ConcurrentHashMap` to ensure:
 
 ---
 
-## 📌 What’s Next (Continued in Day 4)
+## 🧩 RedisInsight & Kafka UI Access Notes
 
-* Simulate retries in Postman Collection Runner
-* Add retry logic (Java + exponential backoff)
-* Replace in-memory store with Redis or PostgreSQL
-* Add expiry policy to stored keys
+### 🔴 RedisInsight (Redis Visual Dashboard)
+
+RedisInsight is included in the `docker-compose.yml` setup. To access:
+
+- 🌐 **URL:** [http://localhost:5540](http://localhost:5540)
+- 🛠️ **Redis Connection Settings:**
+    - **Host:** `redis`
+    - **Port:** `6379`
+    - **Password:** *(leave blank)*
+
+> RedisInsight and Redis are on the same Docker network, so `redis` resolves internally.
+
+#### 🔍 What You Can Do in RedisInsight:
+- View `rate:<userId>` keys for rate limiting
+- View `idempotency:<id>` keys used for duplicate request prevention
+- Inspect TTL countdowns
+- Run CLI commands like `GET`, `TTL`, `INCR`, `EXPIRE`
+
+---
+
+### 🟡 Kafka UI (Topic & Message Browser)
+
+Kafka UI is also included via Docker Compose. To access:
+
+- 🌐 **URL:** [http://localhost:8085](http://localhost:8085)
+
+#### 🔍 What You Can Do:
+- View topics like `topup-events`
+- See partition assignments and message offsets
+- Manually produce or inspect messages
+- Monitor Kafka broker health
+
+---
+
+### ✅ Start Everything
+
+Make sure Docker is running, then launch all services with:
+
+```bash
+docker-compose up -d
+
 
 ---
 
