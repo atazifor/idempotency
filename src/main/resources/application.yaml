@@ -4,6 +4,10 @@ spring:
     redis:
       host: localhost
       port: 6380
+    mongodb:
+      host: localhost
+      port: 27017
+      database: audit_db
   kafka:
     bootstrap-servers: localhost:29092
     producer:

@@ -3,8 +3,8 @@ package com.example.idempotency.controller;
 import com.example.idempotency.model.TopUpAuditEntry;
 import com.example.idempotency.model.TopUpRequest;
 import com.example.idempotency.model.TopUpResponse;
+import com.example.idempotency.repository.TopUpAuditRepository;
 import com.example.idempotency.service.WalletService;
-import com.example.idempotency.store.TopUpAuditLogStore;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,9 +13,12 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.web.bind.annotation.*;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 
 @RestController
@@ -33,7 +36,7 @@ public class WalletController {
     private final ReactiveStringRedisTemplate   redisTemplate; //used for rate limiting, idempotency
     private final KafkaTemplate<String, TopUpAuditEntry> kafkaTemplate;
 
-    private final TopUpAuditLogStore auditLog;
+    private final TopUpAuditRepository auditLog;
 
     @PostMapping("/topup")
     public Mono<ResponseEntity<TopUpResponse>> topUpWallet(@RequestBody TopUpRequest request) {
@@ -60,8 +63,14 @@ public class WalletController {
     }
 
     @GetMapping("/topup/log/{userId}")
-    public Mono<ResponseEntity<List<TopUpAuditEntry>>> getAuditLog(@PathVariable String userId) {
-        return Mono.just(ResponseEntity.ok(auditLog.getLogForUser(userId)));
+    public ResponseEntity<Flux<TopUpAuditEntry>> getAuditLog(@PathVariable String userId) {
+        return ResponseEntity.ok(auditLog.findByUserIdOrderByTimestampDesc(userId));
+    }
+
+    @GetMapping("/topup/log/{userId}/recent")
+    public ResponseEntity<Flux<TopUpAuditEntry>> getRecentAuditLogs(@PathVariable String userId) {
+        Instant from = Instant.now().minus(24, ChronoUnit.HOURS);
+        return ResponseEntity.ok(auditLog.findByTimestampAfter(from));
     }
 
     public Mono<Boolean> rateLimitReached(String userId) {
@@ -112,7 +121,7 @@ public class WalletController {
     }
 
     private void auditKafka(TopUpRequest request, String eventType) {
-        TopUpAuditEntry entry = new TopUpAuditEntry(request.userId(), request.idempotencyKey(), request.amount(), eventType);
+        TopUpAuditEntry entry = new TopUpAuditEntry(request.userId(), request.idempotencyKey(), request.amount(), eventType, Instant.now());
         kafkaTemplate.send("topup-events", request.userId(), entry);
     }
 }
