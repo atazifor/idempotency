@@ -11,7 +11,7 @@ services:
       - "6380:6379" # Access from local tools or your app
 
   redis-insight:
-    image: redislabs/redisinsight:latest
+    image: redislabs/redisinsight:2.68
     container_name: redis-insight
     ports:
       - '5540:5540'  # Use a safer port (macOS sometimes blocks 8001)
@@ -50,7 +50,7 @@ services:
   ### Kafka UI Dashboard
   ### --------------------------
   kafka-ui:
-    image: provectuslabs/kafka-ui:latest
+    image: provectuslabs/kafka-ui:v0.7.2
     container_name: kafka-ui
     ports:
       - "8085:8080" # Access Kafka UI in browser

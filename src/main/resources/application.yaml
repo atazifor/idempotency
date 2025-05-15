@@ -11,6 +11,6 @@ spring:
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
 logging:
   level:
-    org.springframework.data.redis: DEBUG
-    org.apache.kafka.clients: DEBUG
-    org.springframework.kafka: DEBUG
+    org.springframework.data.redis: INFO
+    org.apache.kafka.clients: INFO
+    org.springframework.kafka: INFO

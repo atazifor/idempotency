@@ -4,6 +4,8 @@ import com.example.idempotency.model.TopUpAuditEntry;
 import com.example.idempotency.model.TopUpRequest;
 import com.example.idempotency.model.TopUpResponse;
 import com.example.idempotency.service.WalletService;
+import com.example.idempotency.store.TopUpAuditLogStore;
+import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
@@ -15,15 +17,12 @@ import reactor.core.publisher.Mono;
 
 import java.time.Duration;
 import java.util.*;
-import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/wallet")
+@RequiredArgsConstructor
 public class WalletController {
     Logger logger = LoggerFactory.getLogger(WalletController.class);
-
-    //in-memory audit trail store
-    private final List<TopUpAuditEntry> auditLog = Collections.synchronizedList(new ArrayList<>());
 
     //holds user-id and timestamp of last request for rate limiting
     private static final Duration RATE_LIMIT_WINDOW = Duration.ofSeconds(15);
@@ -34,11 +33,7 @@ public class WalletController {
     private final ReactiveStringRedisTemplate   redisTemplate; //used for rate limiting, idempotency
     private final KafkaTemplate<String, TopUpAuditEntry> kafkaTemplate;
 
-    public WalletController(WalletService walletService, ReactiveStringRedisTemplate   redisTemplate, KafkaTemplate<String, TopUpAuditEntry> kafkaTemplate) {
-        this.walletService = walletService;
-        this.redisTemplate = redisTemplate;
-        this.kafkaTemplate = kafkaTemplate;
-    }
+    private final TopUpAuditLogStore auditLog;
 
     @PostMapping("/topup")
     public Mono<ResponseEntity<TopUpResponse>> topUpWallet(@RequestBody TopUpRequest request) {
@@ -66,10 +61,7 @@ public class WalletController {
 
     @GetMapping("/topup/log/{userId}")
     public Mono<ResponseEntity<List<TopUpAuditEntry>>> getAuditLog(@PathVariable String userId) {
-        return Mono.just(ResponseEntity.ok(auditLog
-                .stream()
-                .filter(entry -> entry.getUserId().equals(userId))
-                .collect(Collectors.toList())));
+        return Mono.just(ResponseEntity.ok(auditLog.getLogForUser(userId)));
     }
 
     public Mono<Boolean> rateLimitReached(String userId) {
