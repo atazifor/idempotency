@@ -36,7 +36,7 @@ public class WalletController {
     private final ReactiveStringRedisTemplate   redisTemplate; //used for rate limiting, idempotency
     private final KafkaTemplate<String, TopUpAuditEntry> kafkaTemplate;
 
-    private final TopUpAuditRepository auditLog;
+    private final TopUpAuditRepository repository;
 
     @PostMapping("/topup")
     public Mono<ResponseEntity<TopUpResponse>> topUpWallet(@RequestBody TopUpRequest request) {
@@ -63,14 +63,14 @@ public class WalletController {
     }
 
     @GetMapping("/topup/log/{userId}")
-    public ResponseEntity<Flux<TopUpAuditEntry>> getAuditLog(@PathVariable String userId) {
-        return ResponseEntity.ok(auditLog.findByUserIdOrderByTimestampDesc(userId));
+    public ResponseEntity<Flux<TopUpAuditEntry>> getRepository(@PathVariable String userId) {
+        return ResponseEntity.ok(repository.findByUserIdOrderByTimestampDesc(userId));
     }
 
     @GetMapping("/topup/log/{userId}/recent")
     public ResponseEntity<Flux<TopUpAuditEntry>> getRecentAuditLogs(@PathVariable String userId) {
         Instant from = Instant.now().minus(24, ChronoUnit.HOURS);
-        return ResponseEntity.ok(auditLog.findByTimestampAfter(from));
+        return ResponseEntity.ok(repository.findByTimestampAfter(from));
     }
 
     public Mono<Boolean> rateLimitReached(String userId) {

@@ -16,4 +16,12 @@ public class KafkaTopicConfig {
                 .build();
     }
 
+    @Bean
+    public NewTopic orderTopic() {
+        return TopicBuilder.name("order-events")
+                .partitions(3)
+                .replicas(1)
+                .build();
+    }
+
 }

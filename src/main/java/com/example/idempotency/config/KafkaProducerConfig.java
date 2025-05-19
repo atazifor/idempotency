@@ -12,4 +12,9 @@ public class KafkaProducerConfig {
     public KafkaTemplate<String, TopUpAuditEntry> kafkaTemplate(ProducerFactory<String, TopUpAuditEntry> factory) {
         return new KafkaTemplate<>(factory);
     }
+
+    @Bean
+    public KafkaTemplate<String, String> kafkaTemplateString(ProducerFactory<String, String> factory) {
+        return new KafkaTemplate<>(factory);
+    }
 }
