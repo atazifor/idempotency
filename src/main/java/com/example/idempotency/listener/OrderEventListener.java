@@ -16,7 +16,7 @@ public class OrderEventListener {
     @KafkaListener(topics = "order-events", groupId = "order-event-log")
     public void listen(String message) {
         logger.info("RAW MESSAGE RECEIVED: {}", message);
-        JsonNode event = null;
+        JsonNode event;
         try {
             event = objectMapper.readTree(message);
             // If outer is a quoted string: "{\"eventType\":\"order-created\"...}"
